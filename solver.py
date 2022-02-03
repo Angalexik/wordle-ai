@@ -1,0 +1,169 @@
+import json
+from time import sleep
+from functools import cmp_to_key
+from collections import Counter
+from PIL import ImageGrab
+from string import ascii_lowercase
+from enum import Enum, auto
+import pyautogui
+from typing import Callable
+
+
+class Score(Enum):
+    NOT_IN_WORD = auto()
+    CORRECT_POSITION = auto()
+    INCORRECT_POSITION = auto()
+    UNKNOWN = auto()
+
+
+WORDLE_ANSWERS_WORDLIST: list[str] = json.load(open("wordle_answer_words.json"))
+WORDLE_GUESS_WORDLIST: list[str] = json.load(open("wordle_guess_words.json"))
+WORDLE_WORDLIST = WORDLE_ANSWERS_WORDLIST + WORDLE_GUESS_WORDLIST
+
+WORDLE_SCORES_COLOUR_TABLE = {
+    (58, 58, 60): Score.NOT_IN_WORD,
+    (83, 141, 78): Score.CORRECT_POSITION,
+    (181, 159, 59): Score.INCORRECT_POSITION,
+    (18, 18, 19): Score.UNKNOWN,
+}
+
+# WORDLE_ANSWERS_WORDLIST: list[str] = json.load(open("ott_answer_words.json"))
+# WORDLE_GUESS_WORDLIST: list[str] = json.load(open("ott_guess_words.json"))
+# WORDLE_WORDLIST = WORDLE_ANSWERS_WORDLIST + WORDLE_GUESS_WORDLIST
+
+OTT_SCORES_COLOUR_TABLE = {
+    (155, 93, 247): Score.NOT_IN_WORD,
+    (46, 216, 60): Score.CORRECT_POSITION,
+    (214, 190, 0): Score.INCORRECT_POSITION,
+    (167, 113, 248): Score.UNKNOWN,
+}
+
+
+def get_letter_score(word_num: int, letter_num: int) -> Score:
+    screen = ImageGrab.grab(bbox=(3795, 874, 3795 + 330, 874 + 400))
+    score = screen.getpixel((2 + 67 * letter_num, 2 + 70 * word_num))
+    return WORDLE_SCORES_COLOUR_TABLE[score]
+
+
+def enter_word(word: str):
+    pyautogui.write(list(word) + ["enter"], interval=0.04)
+    sleep(2)
+
+
+def ott_get_letter_score(word_num: int, letter_num: int) -> Score:
+    screen = ImageGrab.grab(bbox=(3783, 983, 3783 + 354, 983 + 426))
+    score = screen.getpixel((5 + 75 * letter_num, 5 + 73 * word_num))
+    return OTT_SCORES_COLOUR_TABLE[score]
+
+
+class Solver:
+    def __init__(self, enter_word: Callable[[str], None], get_letter_score: Callable[[int, int], Score], start_word=None):
+        self.answer_words = WORDLE_ANSWERS_WORDLIST
+        self.frequencies: dict[str, int] = {}
+        self.letter_blacklist: set[str] = set()
+        self.letters_in_word: set[str] = set()
+        self.known_positions: list[tuple[str, int]] = []
+        self.letter_pos_blacklist: list[tuple[str, int]] = []
+        self.enter_word = enter_word
+        self.get_letter_score = get_letter_score
+        self.start_word = start_word
+
+        self.update_frequencies()
+        self.test_words = self.sort_wordlist(WORDLE_WORDLIST)
+
+    def update_frequencies(self):
+        self.frequencies = dict(Counter("".join(self.answer_words)))
+        for letter in ascii_lowercase:
+            if letter not in self.frequencies:
+                self.frequencies[letter] = 0
+        # for word in self.answer_words:
+        #     for (idx, letter) in enumerate(word):
+        #         self.frequencies[letter][idx] += 1
+
+    def sort_wordlist(self, wordlist: list[str]) -> list[str]:
+        def compare_words(word1: str, word2: str) -> int:
+            if len(set(word1)) != len(word1):
+                return -1
+            if len(set(word2)) != len(word2):
+                return 1
+
+            def letter_val(args: tuple[int, str]):
+                # args[0]: index of the letter in the word
+                # args[1]: the letter
+                return self.frequencies[args[1]]
+
+            first_value = sum(map(letter_val, enumerate(list(word1))))
+            second_value = sum(map(letter_val, enumerate(list(word2))))
+
+            if first_value < second_value:
+                return -1
+            if first_value > second_value:
+                return 1
+            return 0
+
+        return sorted(wordlist, key=cmp_to_key(compare_words), reverse=True)
+
+    def filter_wordlist(self, wordlist: list[str], current_word: str) -> list[str]:
+        def filter_function(word: str) -> bool:
+            if word == current_word:
+                return False
+            for letter in self.letter_blacklist:
+                if letter in word:
+                    return False
+            for letter in self.letters_in_word:
+                if letter not in word:
+                    return False
+            for (letter, pos) in self.letter_pos_blacklist:
+                if word[pos] == letter:
+                    return False
+            for (letter, pos) in self.known_positions:
+                if word[pos] != letter:
+                    return False
+            return True
+
+        return [x for x in wordlist if filter_function(x)]
+        # return list(filter(filter_function, wordlist))
+
+    def guess_word(self, word: str, word_num: int):
+        self.enter_word(word)
+        for position, letter in enumerate(word):
+            score = self.get_letter_score(word_num, position)
+            if score == Score.NOT_IN_WORD:
+                self.letter_blacklist.add(letter)
+            elif score == Score.INCORRECT_POSITION:
+                self.letters_in_word.add(letter)
+                self.letter_pos_blacklist.append((letter, position))
+            elif score == Score.CORRECT_POSITION:
+                self.known_positions.append((letter, position))
+
+        self.answer_words = self.filter_wordlist(self.answer_words, word)
+        self.update_frequencies()
+        self.test_words = self.sort_wordlist(
+            self.filter_wordlist(self.test_words, word)
+        )
+
+    def solve_forever(self):
+        while True:
+            self.solve()
+            self.__init__(self.enter_word, self.get_letter_score, self.start_word)
+            sleep(0.5)
+
+    def solve(self) -> int:
+        for i in range(6):
+            if self.start_word:
+                word = self.start_word if i == 0 else self.test_words[0]
+            else:
+                word = self.test_words[0]
+            if len(self.answer_words) <= 2:
+                word = self.answer_words[0]
+            self.guess_word(word, i)
+            if not self.answer_words:
+                # print(f"Can't believe I got it in only {i + 1} guesses")
+                return i + 1
+        return 99
+
+
+if __name__ == "__main__":
+    solver = Solver(enter_word, ott_get_letter_score, "crate")
+    sleep(2)
+    print(f"Can't believe I got in only {solver.solve_forever()} guesses")
